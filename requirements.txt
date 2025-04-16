@@ -5,6 +5,7 @@
 azure-functions
 requests
 openai
+azure-storage-blob
 # pandas
 # numpy
 # pytz

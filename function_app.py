@@ -1,13 +1,14 @@
-import azure.functions as func
-import datetime
 import json
 import logging
 import os
-import requests
-from base64 import b64decode
+import azure.functions as func
+from datetime import datetime
 
-# Import the AI assistant blueprint
-from ai_assistant import fetch_and_process_repos, query_ai_assistant
+# Import the GitHub client
+from github_client import GitHubClient
+
+# Import AI assistant functions
+from ai_assistant import query_ai_assistant
 
 # Configure logging
 logger = logging.getLogger('portfolio.api')
@@ -19,7 +20,7 @@ app = func.FunctionApp()
 def get_github_repos(req: func.HttpRequest) -> func.HttpResponse:
     logger.info('Processing request for GitHub repos listing')
     
-    # Get token from environment (securely stored in Azure)
+    # Get token from environment
     github_token = os.getenv('GITHUB_TOKEN')
     username = 'yungryce'  # Your GitHub username
     
@@ -31,28 +32,17 @@ def get_github_repos(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
     
-    # Log the request details
-    logger.info(f"Fetching repositories for user: {username}")
-        
-    # Make authenticated request to GitHub API
-    headers = {'Authorization': f'token {github_token}'}
+    # Create GitHub client
+    gh_client = GitHubClient(token=github_token, username=username)
     
     try:
-        response = requests.get(
-            f'https://api.github.com/users/{username}/repos?sort=updated&per_page=10',
-            headers=headers
-        )
+        # Get the repositories
+        all_repos = gh_client.get_user_repos(username)
+        top_repos = all_repos[:10]  # Take only the first 10
         
-        logger.info(f"GitHub API response status: {response.status_code}")
-        
-        if response.status_code != 200:
-            logger.warning(f"GitHub API returned non-200 status: {response.status_code}")
-            logger.debug(f"Response content: {response.text[:500]}...")
-            
-        # Return the GitHub API response directly
         return func.HttpResponse(
-            response.text,
-            status_code=response.status_code,
+            json.dumps(top_repos),
+            status_code=200,
             mimetype="application/json"
         )
     except Exception as e:
@@ -82,29 +72,28 @@ def get_github_repo(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
     
-    # Make authenticated request to GitHub API
-    headers = {'Authorization': f'token {github_token}'}
-    logger.info(f"Making request to GitHub API for repository details: {username}/{repo}")
+    # Create GitHub client
+    gh_client = GitHubClient(token=github_token, username=username)
     
     try:
-        response = requests.get(
-            f'https://api.github.com/repos/{username}/{repo}',
-            headers=headers
-        )
+        # Get repository details
+        repo_details = gh_client.get_repo_details(username, repo)
         
-        logger.info(f"GitHub API response status: {response.status_code}")
-        
-        if response.status_code != 200:
-            logger.warning(f"GitHub API returned non-200 status: {response.status_code}")
-            logger.debug(f"Response content: {response.text[:500]}...")
+        if not repo_details:
+            logger.warning(f"Repository not found: {username}/{repo}")
+            return func.HttpResponse(
+                json.dumps({"error": "Repository not found"}),
+                status_code=404,
+                mimetype="application/json"
+            )
         
         return func.HttpResponse(
-            response.text,
-            status_code=response.status_code,
+            json.dumps(repo_details),
+            status_code=200,
             mimetype="application/json"
         )
     except Exception as e:
-        logger.error(f"Error fetching GitHub repository {username}/{repo}: {str(e)}", exc_info=True)
+        logger.error(f"Error fetching repository details: {str(e)}", exc_info=True)
         return func.HttpResponse(
             json.dumps({"error": f"Failed to fetch repository details: {str(e)}"}),
             status_code=500,
@@ -130,48 +119,48 @@ def get_github_readme(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
     
-    # Make authenticated request to GitHub API for README
-    headers = {
-        'Authorization': f'token {github_token}',
-        'Accept': 'application/vnd.github.v3.raw'
-    }
+    # Create GitHub client
+    gh_client = GitHubClient(token=github_token, username=username)
     
     try:
-        logger.info(f"Fetching README content for {username}/{repo}")
-        response = requests.get(
-            f'https://api.github.com/repos/{username}/{repo}/readme',
-            headers=headers
-        )
+        # Get README content
+        readme_content = gh_client.get_readme(username, repo)
         
-        logger.info(f"GitHub API README response status: {response.status_code}")
-        
-        # If successful, return the raw content
-        if response.status_code == 200:
-            logger.info(f"Successfully retrieved README for {username}/{repo} (length: {len(response.text)} chars)")
+        if not readme_content:
+            logger.warning(f"README not found for repository: {username}/{repo}")
             return func.HttpResponse(
-                response.text,
-                status_code=200,
-                mimetype="text/plain"
+                json.dumps({"error": "README not found for this repository"}),
+                status_code=404,
+                mimetype="application/json"
             )
         
-        # Handle error cases
-        logger.warning(f"Failed to fetch README for {username}/{repo}: status {response.status_code}")
         return func.HttpResponse(
-            json.dumps({"error": "README not found"}),
-            status_code=response.status_code,
-            mimetype="application/json"
+            readme_content,
+            status_code=200,
+            mimetype="text/markdown"
         )
     except Exception as e:
-        logger.error(f"Error fetching README for {username}/{repo}: {str(e)}", exc_info=True)
+        logger.error(f"Error fetching README: {str(e)}", exc_info=True)
         return func.HttpResponse(
             json.dumps({"error": f"Failed to fetch README: {str(e)}"}),
             status_code=500,
             mimetype="application/json"
         )
 
-@app.route(route="portfolio/query", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+@app.route(route="portfolio/query", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST", "OPTIONS"])
 def portfolio_query(req: func.HttpRequest) -> func.HttpResponse:
     logger.info('Processing portfolio query with AI assistance')
+    
+    # Handle CORS preflight requests
+    if req.method == "OPTIONS":
+        return func.HttpResponse(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization"
+            }
+        )
     
     try:
         # Parse request body
@@ -200,24 +189,57 @@ def portfolio_query(req: func.HttpRequest) -> func.HttpResponse:
                 mimetype="application/json"
             )
         
-        # Use the blueprint functions to fetch and process repositories
-        logger.info(f"Fetching and processing repositories for {username}")
-        start_time = datetime.datetime.now()
-        filtered_repos = fetch_and_process_repos(username, github_token)
-        fetch_time = datetime.datetime.now() - start_time
-        logger.info(f"Fetched {len(filtered_repos)} repositories in {fetch_time.total_seconds():.2f} seconds")
+        # Create GitHub client
+        gh_client = GitHubClient(token=github_token, username=username)
+        
+        # Try to get processed repos with graceful fallback
+        try:
+            logger.info("Retrieving processed repositories")
+            filtered_repos = gh_client.get_processed_repos(username)
+            logger.info(f"Successfully retrieved {len(filtered_repos)} repositories")
+        except Exception as e:
+            logger.error(f"Repository retrieval failed: {str(e)}", exc_info=True)
+            if "Failed to resolve" in str(e) or "DNS resolution failure" in str(e):
+                # Network error - check if we have any cached repos
+                cache_key = f"processed_repos_{username}"
+                cached_repos = gh_client._get_from_cache(cache_key)
+                
+                if cached_repos:
+                    logger.info(f"Using {len(cached_repos)} cached repositories despite network error")
+                    filtered_repos = cached_repos
+                else:
+                    return func.HttpResponse(
+                        json.dumps({
+                            "error": "Network connectivity issue accessing GitHub API",
+                            "message": "The server is having trouble connecting to GitHub. Please try again later."
+                        }),
+                        status_code=503,  # Service Unavailable
+                        mimetype="application/json"
+                    )
+            else:
+                # Other error
+                return func.HttpResponse(
+                    json.dumps({"error": f"Failed to retrieve repository data: {str(e)}"}),
+                    status_code=500,
+                    mimetype="application/json"
+                )
         
         # Get AI response using the blueprint function
-        logger.info("Querying AI assistant with portfolio data")
-        start_time = datetime.datetime.now()
-        ai_response = query_ai_assistant(query, filtered_repos)
-        query_time = datetime.datetime.now() - start_time
-        logger.info(f"AI generated response of {len(ai_response)} chars in {query_time.total_seconds():.2f} seconds")
+        try:
+            logger.info("Querying AI assistant with repository data")
+            ai_response = query_ai_assistant(query, filtered_repos)
+            logger.info(f"AI assistant generated a response of {len(ai_response)} chars")
+        except Exception as e:
+            logger.error(f"AI query failed: {str(e)}", exc_info=True)
+            return func.HttpResponse(
+                json.dumps({"error": f"AI processing error: {str(e)}"}),
+                status_code=500,
+                mimetype="application/json"
+            )
         
         # Return the AI response
         result = {
-            "response": ai_response,
-            "repositories": filtered_repos  # Include repository data in response
+            "response": ai_response
         }
         
         logger.info("Portfolio query processed successfully")
@@ -234,3 +256,48 @@ def portfolio_query(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
+
+# Add a health check endpoint
+@app.route(route="health", auth_level=func.AuthLevel.ANONYMOUS)
+def health_check(req: func.HttpRequest) -> func.HttpResponse:
+    """Simple endpoint to check API health"""
+    logger.info('Processing API health check')
+    
+    # Perform basic GitHub connectivity test
+    github_token = os.getenv('GITHUB_TOKEN')
+    if github_token:
+        try:
+            # Create GitHub client with short cache TTL
+            gh_client = GitHubClient(token=github_token, username='yungryce')
+            gh_client.cache_ttl = 60  # 1 minute cache
+            
+            # Test GitHub API connectivity
+            rate_limit = gh_client.make_request('GET', 'rate_limit')
+            github_status = "connected" if rate_limit else "error"
+        except Exception as e:
+            logger.error(f"GitHub connectivity test failed: {str(e)}")
+            github_status = f"error: {str(e)}"
+    else:
+        github_status = "unconfigured"
+    
+    # Check GROQ API key
+    groq_api_key = os.getenv('GROQ_API_KEY')
+    groq_status = "configured" if groq_api_key else "unconfigured"
+    
+    # Check Azure Storage
+    azure_storage = os.getenv('AzureWebJobsStorage')
+    storage_status = "configured" if azure_storage else "unconfigured"
+    
+    return func.HttpResponse(
+        json.dumps({
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "environment": {
+                "github_api": github_status,
+                "groq_api": groq_status,
+                "azure_storage": storage_status
+            }
+        }),
+        status_code=200,
+        mimetype="application/json"
+    )
